@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# VSCode
+.vscode/
+
+# Tuya API credentials
+.config
+
+devices.json
+
+# OS
+.DS_Store
