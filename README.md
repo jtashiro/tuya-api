@@ -7,6 +7,28 @@ This repository provides Python scripts for interacting with Tuya Cloud devices,
 - Tuya Cloud account ([iot.tuya.com](https://iot.tuya.com/))
 - Tuya API credentials (Access ID, Access Secret, and registered project)
 
+## Virtual Environment Setup (Recommended)
+
+1. Create a virtual environment:
+   ```bash
+   python3 -m venv .venv
+   ```
+2. Activate the virtual environment:
+   - On Linux/macOS:
+     ```bash
+     source .venv/bin/activate
+     ```
+   - On Windows:
+     ```cmd
+     .venv\Scripts\activate
+     ```
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+All commands in this README assume you have activated your virtual environment.
+
 ## Setup
 1. Install dependencies:
    ```bash
