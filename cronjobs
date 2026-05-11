@@ -1,0 +1,5 @@
+# Turn ON switch if temp < threshold (e.g., 70°F)
+*/5 * * * * /usr/bin/env bash -c 'cd /Users/jtashiro/dev/tuya-api && /Users/jtashiro/dev/tuya-api/.venv/bin/python tuya-temp-control.py --sensor "Downstairs T&H sensor" --switch "DR Avalon Mini" --threshold 70 --direction lt --state on >> cron.log 2>&1'
+
+# Turn OFF switch if temp > threshold (e.g., 75°F)
+*/5 * * * * /usr/bin/env bash -c 'cd /Users/jtashiro/dev/tuya-api && /Users/jtashiro/dev/tuya-api/.venv/bin/python tuya-temp-control.py --sensor "Downstairs T&H sensor" --switch "DR Avalon Mini" --threshold 75 --direction gt --state off >> cron.log 2>&1'

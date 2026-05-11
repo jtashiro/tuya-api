@@ -208,10 +208,18 @@ def extract_temperature_f(status: dict) -> tuple[float | None, float | None, str
     return None, None, None
 
 def main():
+
     parser = argparse.ArgumentParser(description="Tuya temperature control script")
     parser.add_argument("--threshold", type=float, default=75.0, help="Temperature threshold in °F (default: 75)")
     parser.add_argument("--sensor", default="Downstairs T&H sensor", help="Friendly name of temperature sensor")
     parser.add_argument("--switch", default="DR Avalon Mini", help="Friendly name of switch to control")
+    parser.add_argument("--state", choices=["on", "off"], default="off", help="Desired switch state when threshold is crossed (on/off, default: off)")
+    parser.add_argument(
+        "--direction",
+        choices=["gt", "ge", "lt", "le"],
+        default="gt",
+        help="Threshold direction: 'gt' (temp > threshold), 'ge' (temp >= threshold), 'lt' (temp < threshold), 'le' (temp <= threshold). Default: gt"
+    )
     parser.add_argument("--log", default=None, help="Log file path")
     parser.add_argument("--dry-run", action="store_true", help="Show actions but do not send commands")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
@@ -294,21 +302,40 @@ def main():
         if key in switch_status:
             control_key = key
             break
-    if temp_f > args.threshold:
-        if is_on:
-            logging.info(f"Temperature {temp_f:.1f}°F > {args.threshold}°F: turning OFF '{args.switch}'")
+    # Determine if action should be taken based on direction and threshold
+
+    trigger = False
+    if args.direction == "gt":
+        trigger = temp_f > args.threshold
+        direction_str = f"> {args.threshold}"
+    elif args.direction == "ge":
+        trigger = temp_f >= args.threshold
+        direction_str = f">= {args.threshold}"
+    elif args.direction == "lt":
+        trigger = temp_f < args.threshold
+        direction_str = f"< {args.threshold}"
+    elif args.direction == "le":
+        trigger = temp_f <= args.threshold
+        direction_str = f"<= {args.threshold}"
+
+    desired_on = args.state == "on"
+    state_str = "ON" if desired_on else "OFF"
+
+    if trigger:
+        if is_on == desired_on:
+            logging.info(f"Temperature {temp_f:.1f}°F {direction_str}°F: switch already {state_str}")
+        else:
+            logging.info(f"Temperature {temp_f:.1f}°F {direction_str}°F: setting '{args.switch}' to {state_str}")
             if not args.dry_run:
                 if control_key:
-                    resp = cloud.set_device(switch["id"], control_key, False)
-                    logging.info(f"Switch off command response: {resp}")
+                    resp = cloud.set_device(switch["id"], control_key, desired_on)
+                    logging.info(f"Switch {state_str.lower()} command response: {resp}")
                 else:
                     logging.error(f"No valid control key found for switch '{args.switch}'")
             else:
-                logging.info("(Dry run) Would send switch off command")
-        else:
-            logging.info(f"Temperature {temp_f:.1f}°F > {args.threshold}°F but switch already OFF")
+                logging.info(f"(Dry run) Would send switch {state_str.lower()} command")
     else:
-        logging.info(f"Temperature {temp_f:.1f}°F <= {args.threshold}°F: no action needed")
+        logging.info(f"Temperature {temp_f:.1f}°F does not meet trigger condition ({direction_str}°F): no action needed")
 
 if __name__ == "__main__":
     main()
