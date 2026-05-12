@@ -54,13 +54,30 @@ def load_config(path: str = CONFIG_FILE) -> dict:
 # ---------------------------------------------------------------------------
 
 class TuyaCloud:
+    def get_homes(self) -> list[dict]:
+        """Fetch all homes (families) for the account."""
+        data = self._get("/v1.0/users/families")
+        if not data.get("success"):
+            print(f"  Warning: could not fetch homes: {data.get('msg', data)}")
+            return []
+        result = data.get("result", {})
+        # API may return a list or a dict with 'list' key
+        if isinstance(result, list):
+            return result
+        return result.get("list", [])
+
+    def get_home_name_map(self) -> dict:
+        """Return a dict mapping home_id to home name."""
+        homes = self.get_homes()
+        return {h.get("home_id") or h.get("id"): h.get("name", "(Unnamed Home)") for h in homes}
+
     def __init__(self, access_id: str, access_key: str, base_url: str = TUYA_BASE_URL):
         self.access_id = access_id
         self.access_key = access_key
         self.base_url = base_url.rstrip("/")
-        self._token: str | None = None
-        self._token_expiry: float = 0
-        self._uid: str = ""
+        self._token = None  # type: ignore
+        self._token_expiry = 0
+        self._uid = ""
 
     # ---- auth helpers -------------------------------------------------------
 
@@ -271,6 +288,10 @@ def main():
     print(f"Connecting to Tuya Cloud  ({base_url}) …")
     cloud = TuyaCloud(access_id, access_key, base_url)
 
+
+    print("Fetching home list …")
+    home_name_map = cloud.get_home_name_map()
+
     print("Fetching device list …")
     devices = cloud.get_devices()
 
@@ -280,40 +301,47 @@ def main():
 
     print(f"Found {len(devices)} device(s). Fetching status …\n")
 
-    rows = []
+    # Group devices by home_id
+    devices_by_home = {}
     for dev in devices:
-        dev_id = dev.get("id", "")
-        name = dev.get("name", "") or dev.get("local_key", dev_id)
-        category = dev.get("category", "")
-        product_name = dev.get("product_name", "")
-        ip = dev.get("ip", "")
-        online = dev.get("online")
+        home_id = dev.get("home_id") or dev.get("asset_id") or "(No Home)"
+        devices_by_home.setdefault(home_id, []).append(dev)
 
-        status = cloud.get_device_status(dev_id)
+    total_devices = 0
+    for home_id, devs in devices_by_home.items():
+        home_name = home_name_map.get(home_id, f"Home {home_id}" if home_id != "(No Home)" else "(No Home)")
+        print(f"\n=== Home: {home_name} (ID: {home_id}) ===")
+        rows = []
+        for dev in devs:
+            dev_id = dev.get("id", "")
+            name = dev.get("name", "") or dev.get("local_key", dev_id)
+            category = dev.get("category", "")
+            product_name = dev.get("product_name", "")
+            ip = dev.get("ip", "")
+            online = dev.get("online")
+            status = cloud.get_device_status(dev_id)
+            rows.append({
+                "Name": name,
+                "ID": dev_id,
+                "Category": category,
+                "Product": product_name,
+                "IP": ip,
+                "Connection": online_label(online),
+                "Status": status_summary(status),
+            })
+        # Sort by friendly name (case-insensitive)
+        rows.sort(key=lambda r: r["Name"].lower())
+        headers = ["Name", "ID", "Category", "Product", "IP", "Connection", "Status"]
+        table = PrettyTable(headers)
+        table.align = "l"
+        table.align["Connection"] = "c"
+        for r in rows:
+            table.add_row([r[h] for h in headers])
+        print(table)
+        print(f"Devices in this home: {len(rows)}")
+        total_devices += len(rows)
 
-        rows.append({
-            "Name": name,
-            "ID": dev_id,
-            "Category": category,
-            "Product": product_name,
-            "IP": ip,
-            "Connection": online_label(online),
-            "Status": status_summary(status),
-        })
-
-    # Sort by friendly name (case-insensitive)
-    rows.sort(key=lambda r: r["Name"].lower())
-
-    headers = ["Name", "ID", "Category", "Product", "IP", "Connection", "Status"]
-
-    table = PrettyTable(headers)
-    table.align = "l"
-    table.align["Connection"] = "c"
-    for r in rows:
-        table.add_row([r[h] for h in headers])
-
-    print(table)
-    print(f"\nTotal: {len(rows)} device(s)")
+    print(f"\nTotal: {total_devices} device(s)")
 
 
 if __name__ == "__main__":

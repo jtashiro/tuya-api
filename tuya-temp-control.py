@@ -1,3 +1,43 @@
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+try:
+    from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO
+except ImportError:
+    SMTP_SERVER = SMTP_PORT = SMTP_USERNAME = SMTP_PASSWORD = EMAIL_FROM = EMAIL_TO = None
+
+def send_state_change_email(sensor_name, temp_f, switch_name, new_state, resp=None):
+    if not all([SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
+        logging.warning("Email config not set, skipping email notification.")
+        return
+    subject = f"Tuya Device State Changed: {switch_name} is now {new_state}"
+    html = f"""
+    <html>
+    <body>
+        <h2>Tuya Device State Changed</h2>
+        <p><b>Sensor:</b> {sensor_name}</p>
+        <p><b>Temperature:</b> {temp_f:.1f}°F</p>
+        <p><b>Switch:</b> {switch_name}</p>
+        <p><b>New State:</b> <span style='color:{'green' if new_state=='ON' else 'red'}'>{new_state}</span></p>
+        {f'<pre>Response: {json.dumps(resp, indent=2)}</pre>' if resp else ''}
+        <p><i>Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i></p>
+    </body>
+    </html>
+    """
+    msg = MIMEMultipart('alternative')
+    msg['Subject'] = subject
+    msg['From'] = EMAIL_FROM
+    msg['To'] = EMAIL_TO
+    part = MIMEText(html, 'html')
+    msg.attach(part)
+    try:
+        with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT)) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        logging.info(f"Sent state change email to {EMAIL_TO}")
+    except Exception as e:
+        logging.error(f"Failed to send email: {e}")
 #!/usr/bin/env python3
 """
 Tuya Cloud Temperature Control Script
@@ -211,8 +251,8 @@ def main():
 
     parser = argparse.ArgumentParser(description="Tuya temperature control script")
     parser.add_argument("--threshold", type=float, default=75.0, help="Temperature threshold in °F (default: 75)")
-    parser.add_argument("--sensor", default="Downstairs T&H sensor", help="Friendly name of temperature sensor")
-    parser.add_argument("--switch", default="DR Avalon Mini", help="Friendly name of switch to control")
+    parser.add_argument("--sensor", default="Downstairs T & H Sensor", help="Friendly name of temperature sensor")
+    parser.add_argument("--switch", default="Avalon Mini", help="Friendly name of switch to control")
     parser.add_argument("--state", choices=["on", "off"], default="off", help="Desired switch state when threshold is crossed (on/off, default: off)")
     parser.add_argument(
         "--direction",
@@ -330,6 +370,7 @@ def main():
                 if control_key:
                     resp = cloud.set_device(switch["id"], control_key, desired_on)
                     logging.info(f"Switch {state_str.lower()} command response: {resp}")
+                    send_state_change_email(args.sensor, temp_f, args.switch, state_str, resp)
                 else:
                     logging.error(f"No valid control key found for switch '{args.switch}'")
             else:
