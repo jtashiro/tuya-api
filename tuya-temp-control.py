@@ -16,6 +16,10 @@ Examples
 # Control by raw switch code (backward-compatible):
   ./tuya-temp-control.py --sensor "Downstairs T&H Sensor" --device "Living Room Strip" --outlet switch_2 --threshold 75 --state off
 
+# Two rules in one run (replaces two separate cron jobs):
+  ./tuya-temp-control.py --sensor "Downstairs T&H Sensor" --device "DR Avalon Mini" \
+      --rule lt:72:on --rule gt:74:off
+
 # List all outlets on a device:
   ./tuya-temp-control.py --device "Living Room Strip" --list-outlets
 
@@ -720,6 +724,11 @@ def main():
                         help="Desired switch state when threshold is crossed (default: off)")
     parser.add_argument("--direction",  choices=["gt", "ge", "lt", "le"], default="gt",
                         help="gt=>  ge>= lt<  le<=  (default: gt)")
+    parser.add_argument("--rule", action="append", metavar="DIR:TEMP:STATE",
+                        help=(
+                            "Condition as DIRECTION:THRESHOLD:STATE, e.g. 'lt:72:on'. "
+                            "Repeatable. When used, --threshold/--state/--direction are ignored."
+                        ))
     parser.add_argument("--home",        default=None,
                         help="Restrict device lookup to this home (Tuya app name or .config [home:NAME])")
     parser.add_argument("--room",        default=None,
@@ -826,31 +835,44 @@ def main():
         f"         Reading : {temp_c:.1f}°C / {temp_f:.1f}°F{humidity_str}  (key: {temp_key})"
     )
 
-    # ---- evaluate condition (once) ------------------------------------------
+    # ---- build rules list ---------------------------------------------------
     direction_labels = {"gt": ">", "ge": ">=", "lt": "<", "le": "<="}
-    op_str = direction_labels[args.direction]
-    trigger = {
-        "gt": temp_f >  args.threshold,
-        "ge": temp_f >= args.threshold,
-        "lt": temp_f <  args.threshold,
-        "le": temp_f <= args.threshold,
-    }[args.direction]
+    if args.rule:
+        rules: list[tuple[str, float, str]] = []
+        for r in args.rule:
+            parts = r.split(":")
+            if len(parts) != 3:
+                sys.exit(f"Invalid --rule '{r}': expected DIRECTION:THRESHOLD:STATE (e.g. lt:72:on)")
+            direction, threshold_str, state = parts
+            if direction not in direction_labels:
+                sys.exit(f"Invalid direction '{direction}' in --rule '{r}': must be gt, ge, lt, or le")
+            if state not in ("on", "off"):
+                sys.exit(f"Invalid state '{state}' in --rule '{r}': must be on or off")
+            rules.append((direction, float(threshold_str), state))
+    else:
+        rules = [(args.direction, args.threshold, args.state)]
 
-    desired_on    = args.state == "on"
-    state_str     = "ON" if desired_on else "OFF"
-    condition_str = f"{temp_f:.1f}°F {op_str} {args.threshold}°F"
-    logging.info(f"Condition: {condition_str}  →  {'TRIGGERED' if trigger else 'not triggered'}")
+    # ---- evaluate each rule and act -----------------------------------------
+    for direction, threshold, state in rules:
+        op_str        = direction_labels[direction]
+        trigger       = {"gt": temp_f > threshold, "ge": temp_f >= threshold,
+                         "lt": temp_f < threshold, "le": temp_f <= threshold}[direction]
+        desired_on    = state == "on"
+        state_str     = "ON" if desired_on else "OFF"
+        condition_str = f"{temp_f:.1f}°F {op_str} {threshold}°F"
+        logging.info(f"Rule {direction}:{threshold}:{state}  →  {condition_str}  →  {'TRIGGERED' if trigger else 'not triggered'}")
 
-    # ---- act on each target -------------------------------------------------
-    for dev_name, outlet_spec in device_specs:
-        target_dev, switch_code, outlet_display = resolve_target(dev_name, outlet_spec)
-        target_label = f"'{dev_name}' {outlet_display}"
+        if not trigger:
+            continue
 
-        target_status = cloud.get_device_status(target_dev["id"])
-        is_on = target_status.get(switch_code)
-        logging.info(f"Target {target_label}  (id: {target_dev['id']})  current state: {'ON' if is_on else 'OFF'}")
+        for dev_name, outlet_spec in device_specs:
+            target_dev, switch_code, outlet_display = resolve_target(dev_name, outlet_spec)
+            target_label = f"'{dev_name}' {outlet_display}"
 
-        if trigger:
+            target_status = cloud.get_device_status(target_dev["id"])
+            is_on = target_status.get(switch_code)
+            logging.info(f"Target {target_label}  (id: {target_dev['id']})  current state: {'ON' if is_on else 'OFF'}")
+
             if is_on == desired_on:
                 logging.info(f"No action needed — {target_label} is already {state_str}")
             else:
@@ -868,8 +890,6 @@ def main():
                         )
                     else:
                         logging.error(f"Command failed: {resp.get('msg', resp)}")
-        else:
-            logging.info(f"Condition not met ({condition_str}): no action taken for {target_label}")
 
 
 if __name__ == "__main__":
