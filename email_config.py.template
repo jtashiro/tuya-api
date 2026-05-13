@@ -1,0 +1,7 @@
+# Email configuration for tuya-temp-control.py
+SMTP_SERVER = ""
+SMTP_PORT = 587
+SMTP_USERNAME = ""
+SMTP_PASSWORD = ""
+EMAIL_FROM = ""
+EMAIL_TO = ""

@@ -16,3 +16,6 @@ devices.json
 
 # OS
 .DS_Store
+
+#email credentials
+email_config.py
