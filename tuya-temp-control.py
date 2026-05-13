@@ -175,7 +175,8 @@ class TuyaCloud:
         self.base_url = base_url.rstrip("/")
         self._token: Optional[str] = None
         self._token_expiry: float = 0
-        self._uid: str = ""
+        self._uid: str = ""        # project/token UID
+        self._owner_uid: str = ""  # device-owner UID, set after first device fetch
         self._session = requests.Session()
         self._lock = threading.Lock()
 
@@ -250,11 +251,13 @@ class TuyaCloud:
 
     def get_devices(self) -> list[dict]:
         self._get_token()
-        if self._uid:
-            devices = self._get_devices_by_uid(self._uid)
-            if devices:
-                return devices
-        return self._get_devices_iot01()
+        if self._owner_uid:
+            return self._get_devices_by_uid(self._owner_uid)
+        devices = self._get_devices_iot01()
+        owner_uid = next((d.get("uid", "") for d in devices if d.get("uid")), "")
+        if owner_uid:
+            self._owner_uid = owner_uid
+        return devices
 
     def _get_devices_by_uid(self, uid: str) -> list[dict]:
         devices, page_no, page_size = [], 1, 100
@@ -292,20 +295,14 @@ class TuyaCloud:
 
     # ---- home / room management ---------------------------------------------
 
-    def get_homes(self, uid: str = "") -> list[dict]:
+    def get_homes(self) -> list[dict]:
         """
-        List homes for the given user UID.
-
-        Pass the device-owner UID (the 'uid' field on device records), not the
-        project/token UID — those are different values in grant_type=1 flows.
-        Falls back to self._uid if uid is not supplied. Returns [] on 1106.
+        List homes for the device owner. Uses _owner_uid set by get_devices();
+        call get_devices() first. Returns [] on failure.
         """
-        target_uid = uid or self._uid
-        if not target_uid:
-            self._get_token()
-            target_uid = self._uid
-        data = self._get(f"/v1.0/users/{target_uid}/homes")
-        logging.debug(f"get_homes ({target_uid}): {data}")
+        uid = self._owner_uid or self._uid
+        data = self._get(f"/v1.0/users/{uid}/homes")
+        logging.debug(f"get_homes ({uid}): {data}")
         if not data.get("success"):
             logging.debug(f"get_homes failed: {data.get('msg', data)}")
             return []
@@ -329,10 +326,10 @@ class TuyaCloud:
         devs = result if isinstance(result, list) else result.get("devices", result.get("list", []))
         return {d["id"] for d in devs if "id" in d}
 
-    def get_room_device_ids(self, room_id) -> set[str]:
+    def get_room_device_ids(self, home_id, room_id) -> set[str]:
         """IDs of all devices in a room. Returns empty set if not permitted."""
-        data = self._get(f"/v1.0/rooms/{room_id}/devices")
-        logging.debug(f"get_room_devices {room_id}: {data}")
+        data = self._get(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices")
+        logging.debug(f"get_room_devices {home_id}/{room_id}: {data}")
         if not data.get("success"):
             return set()
         result = data.get("result", {})
@@ -574,13 +571,7 @@ def resolve_location_filter(
     if not home_name and not room_name:
         return devices
 
-    # The device-owner UID (e.g. az1621247140272fk0jz) differs from the token
-    # UID returned by grant_type=1 (e.g. bay1624012667215lt3I). Extract it from
-    # the device list so the homes API uses the right user.
-    owner_uid = next((d.get("uid", "") for d in devices if d.get("uid")), "")
-    logging.debug(f"resolve_location_filter: owner_uid={owner_uid!r}")
-
-    homes_api = cloud.get_homes(uid=owner_uid)
+    homes_api = cloud.get_homes()
     if homes_api:
         return _filter_via_api(cloud, devices, homes_api, home_name, room_name)
     return _filter_via_config(devices, home_map, home_name, room_name)
@@ -614,7 +605,7 @@ def _filter_via_api(
             if not room:
                 avail = ", ".join(f'"{r.get("name","")}"' for r in rooms) or "none"
                 sys.exit(f'Room "{room_name}" not found in home "{home_name}". Available: {avail}')
-            device_ids = cloud.get_room_device_ids(_room_id(room))
+            device_ids = cloud.get_room_device_ids(hid, _room_id(room))
         else:
             device_ids = cloud.get_home_device_ids(hid)
 
@@ -623,11 +614,12 @@ def _filter_via_api(
         device_ids = set()
         found_home = None
         for h in homes_api:
-            rooms = cloud.get_home_rooms(_home_id(h))
+            hid_search = _home_id(h)
+            rooms = cloud.get_home_rooms(hid_search)
             room = next((r for r in rooms
                          if r.get("name","").strip().lower() == room_name.strip().lower()), None)
             if room:
-                device_ids = cloud.get_room_device_ids(_room_id(room))
+                device_ids = cloud.get_room_device_ids(hid_search, _room_id(room))
                 found_home = h.get("name", "")
                 break
         if not found_home:
