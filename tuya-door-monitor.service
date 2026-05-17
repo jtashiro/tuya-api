@@ -1,0 +1,26 @@
+[Unit]
+Description=Tuya Door Sensor Monitor
+Documentation=https://github.com/tuya/tuya-pulsar-sdk-python
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+WorkingDirectory=/home/YOUR_USERNAME/tuya-api
+ExecStart=/home/YOUR_USERNAME/tuya-api/.venv/bin/python3 /home/YOUR_USERNAME/tuya-api/tuya-door-monitor.py
+
+# Restart on failure with a short delay to avoid hammering the broker
+Restart=on-failure
+RestartSec=10
+
+# Give the network a moment to be fully up before the first connect attempt
+ExecStartPre=/bin/sleep 5
+
+# Write stdout/stderr to the systemd journal (view with: journalctl -u tuya-door-monitor -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tuya-door-monitor
+
+[Install]
+WantedBy=multi-user.target
