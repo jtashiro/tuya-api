@@ -26,6 +26,7 @@ Usage
 
 import argparse
 import base64
+import socket
 import hashlib
 import hmac
 import json
@@ -96,6 +97,8 @@ class TuyaCloud:
         self.base_url   = base_url.rstrip("/")
         self._token:        str   = ""
         self._token_expiry: float = 0
+        self._uid:          str   = ""
+        self._owner_uid:    str   = ""
 
     def _sign(self, method: str, path: str, body: str = "", token: str = "") -> tuple[str, str]:
         ts = str(int(time.time() * 1000))
@@ -123,6 +126,7 @@ class TuyaCloud:
         if not data.get("success"):
             sys.exit(f"Token error: {data.get('msg', data)}")
         self._token        = data["result"]["access_token"]
+        self._uid          = data["result"].get("uid", "")
         self._token_expiry = time.time() + data["result"]["expire_time"] - 60
         return self._token
 
@@ -151,6 +155,8 @@ class TuyaCloud:
             batch        = result.get("devices", result.get("list", []))
             last_row_key = result.get("last_row_key", "")
             devices.extend(batch)
+            if not self._owner_uid:
+                self._owner_uid = next((d.get("uid", "") for d in batch if d.get("uid")), "")
             if not result.get("has_more") or not last_row_key or not batch:
                 break
         return devices
@@ -181,6 +187,42 @@ class TuyaCloud:
                 sys.exit(f'Sensor "{name}" not found.\nAvailable:\n  ' + "\n  ".join(available))
             result[match["id"]] = match.get("name", match["id"]).strip()
         return result
+
+    def get_homes(self) -> list[dict]:
+        uid  = self._owner_uid or self._uid
+        data = self._get(f"/v1.0/users/{uid}/homes")
+        if not data.get("success"):
+            logging.debug(f"get_homes failed: {data.get('msg', data)}")
+            return []
+        return data.get("result", [])
+
+    def get_home_rooms(self, home_id) -> list[dict]:
+        data = self._get(f"/v1.0/homes/{home_id}/rooms")
+        if not data.get("success"):
+            return []
+        result = data.get("result", {})
+        return result.get("rooms", result) if isinstance(result, dict) else result
+
+    def get_room_device_ids(self, home_id, room_id) -> list[str]:
+        data = self._get(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices")
+        if not data.get("success"):
+            return []
+        result = data.get("result", {})
+        devs   = result if isinstance(result, list) else result.get("devices", result.get("list", []))
+        return [d["id"] for d in devs if "id" in d]
+
+    def build_location_map(self) -> dict[str, tuple[str, str]]:
+        """Return {device_id: (home_name, room_name)} for all devices in rooms."""
+        mapping: dict[str, tuple[str, str]] = {}
+        for home in self.get_homes():
+            home_id   = home.get("home_id") or home.get("id")
+            home_name = home.get("name", "")
+            for room in self.get_home_rooms(home_id):
+                room_id   = room.get("room_id") or room.get("id")
+                room_name = room.get("name", "")
+                for did in self.get_room_device_ids(home_id, room_id):
+                    mapping[did] = (home_name, room_name)
+        return mapping
 
 
 # ---------------------------------------------------------------------------
@@ -243,23 +285,29 @@ def decrypt_message(pulsar_message, access_key: str) -> str | None:
 # Email
 # ---------------------------------------------------------------------------
 
-def send_door_email(sensor_name: str, state: str) -> None:
+def send_door_email(sensor_name: str, state: str,
+                    home_name: str = "", room_name: str = "") -> None:
     if not all([SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
         logging.warning("Email config not set — skipping notification.")
         return
-    color   = "red" if state == "OPENED" else "green"
-    subject = f"Door Alert: {sensor_name} {state}"
+    color       = "red" if state == "OPENED" else "green"
+    home_prefix = f"[{home_name}] " if home_name else ""
+    subject     = f"Door Alert: {home_prefix}{sensor_name} {state}"
+    now         = datetime.now().astimezone()
+    timestamp   = now.strftime("%Y-%m-%d %H:%M:%S %Z")
     html = f"""
     <html><body>
         <h2>Door Sensor Alert</h2>
         <p><b>Sensor:</b> {sensor_name}</p>
+        <p><b>Home:</b> {home_name or "—"}</p>
+        <p><b>Room:</b> {room_name or "—"}</p>
         <p><b>State:</b> <span style='color:{color}; font-size:1.2em'><b>{state}</b></span></p>
-        <p><i>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</i></p>
+        <p><i>{timestamp}</i></p>
     </body></html>
     """
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = EMAIL_FROM
+    msg["From"]    = f"SmartLifeMonitor <{EMAIL_FROM}>"
     msg["To"]      = EMAIL_TO
     msg.attach(MIMEText(html, "html"))
     try:
@@ -287,7 +335,9 @@ def main() -> None:
                              "Omit to monitor all door sensors on the account.")
     parser.add_argument("--open-only", action="store_true",
                         help="Send email only when the door opens, not when it closes")
-    default_consumer = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    host = socket.gethostname().split(".")[0]
+    prog = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    default_consumer = f"{host}-{prog}"
     parser.add_argument("--consumer-name", default=default_consumer,
                         help=f"Consumer name shown in the Tuya portal (default: {default_consumer})")
     parser.add_argument("--test-env", action="store_true",
@@ -315,8 +365,15 @@ def main() -> None:
     label   = "all door sensors" if not args.sensor else ", ".join(f'"{s}"' for s in args.sensor)
     logging.info(f"Resolving sensors ({label}) …")
     monitored = cloud.resolve_sensors(args.sensor)   # {device_id: name}
-    for did, dname in monitored.items():
-        logging.info(f'  Monitoring: "{dname}"  id={did}')
+
+    logging.info("Fetching home/room assignments …")
+    location_map = cloud.build_location_map()         # {device_id: (home, room)}
+    for did, dname in sorted(monitored.items(),
+                             key=lambda kv: (location_map.get(kv[0], ("", ""))[0].lower(),
+                                             kv[1].lower())):
+        home, room = location_map.get(did, ("", ""))
+        path = " / ".join(filter(None, [home, room, dname]))
+        logging.info(f'  Monitoring: {path}  id={did}')
 
     # -- Pulsar setup ----------------------------------------------------------
     mq_env       = MQ_ENV_TEST if args.test_env else MQ_ENV_PROD
@@ -326,11 +383,13 @@ def main() -> None:
     logging.info(f"Connecting to {PULSAR_URL} …")
     logging.debug(f"  topic={topic}  subscription={sub_name}  env={mq_env}")
 
+    pulsar_log_level = pulsar.LoggerLevel.Debug if args.debug else pulsar.LoggerLevel.Error
     client = pulsar.Client(
         PULSAR_URL,
         authentication=get_pulsar_auth(access_id, access_key),
         tls_allow_insecure_connection=True,
         operation_timeout_seconds=30,
+        logger=pulsar.ConsoleLogger(pulsar_log_level),
     )
 
     consumer = client.subscribe(
@@ -372,19 +431,26 @@ def main() -> None:
                 consumer.acknowledge_cumulative(msg)
                 continue
 
-            dev_id      = payload.get("devId") or payload.get("dev_id", "")
+            # devId may be top-level (older format) or inside bizData (newer format)
+            biz_data = payload.get("bizData", {})
+            dev_id   = payload.get("devId") or biz_data.get("devId", "")
+
             sensor_name = monitored.get(dev_id)
             if sensor_name is None:
                 consumer.acknowledge_cumulative(msg)
                 continue
 
-            for item in payload.get("status", []):
+            # status items may be in top-level 'status' or bizData 'properties'
+            items = payload.get("status") or biz_data.get("properties", [])
+            for item in items:
                 if item.get("code") == DOOR_CODE:
                     is_open = bool(item.get("value"))
                     state   = "OPENED" if is_open else "CLOSED"
-                    logging.info(f'Door event: "{sensor_name}" → {state}')
+                    home, room = location_map.get(dev_id, ("", ""))
+                    loc_str    = f" [{home} / {room}]" if home or room else ""
+                    logging.info(f'Door event: "{sensor_name}"{loc_str} → {state}')
                     if is_open or not args.open_only:
-                        send_door_email(sensor_name, state)
+                        send_door_email(sensor_name, state, home, room)
 
             consumer.acknowledge_cumulative(msg)
 
