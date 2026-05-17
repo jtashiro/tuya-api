@@ -487,17 +487,18 @@ def main() -> None:
         logging.info(f'  Monitoring: {path}  id={did}')
 
     # -- Shared state (accessed from both Pulsar and poll threads) -------------
-    readings:    dict[str, dict]  = {did: {"temp_c": None, "humidity": None} for did in monitored}
-    last_alert:  dict[str, float] = {}
-    last_pulsar: dict[str, float] = {}   # last time Pulsar delivered a reading for this sensor
-    state_lock   = threading.Lock()
-    cooldown_secs      = args.cooldown * 60
-    poll_interval_secs = args.poll_interval * 60
+    readings:       dict[str, dict]  = {did: {"temp_c": None, "humidity": None} for did in monitored}
+    last_logged:    dict[str, dict]  = {did: {"temp_c": None, "humidity": None} for did in monitored}
+    last_alert:     dict[str, float] = {}
+    pulsar_sensors: set[str]         = set()   # sensors confirmed to push via Pulsar
+    state_lock      = threading.Lock()
+    cooldown_secs       = args.cooldown * 60
+    poll_interval_secs  = args.poll_interval * 60
 
     def process_items(dev_id: str, items: list[dict], source: str) -> None:
         """Apply a batch of DPS status items, log changes, and fire alerts."""
-        changed = []
         with state_lock:
+            changed = []
             for item in items:
                 code  = item.get("code", "")
                 value = item.get("value")
@@ -507,11 +508,18 @@ def main() -> None:
                 elif code in HUMIDITY_CODES and value is not None:
                     readings[dev_id]["humidity"] = float(value)
                     changed.append(f"humidity={readings[dev_id]['humidity']:.0f}%")
+
+            if not changed:
+                return
+
             temp_c   = readings[dev_id]["temp_c"]
             humidity = readings[dev_id]["humidity"]
 
-        if not changed:
-            return
+            # Deduplicate: Tuya often sends two identical Pulsar messages per cycle
+            prev = last_logged[dev_id]
+            if temp_c == prev["temp_c"] and humidity == prev["humidity"]:
+                return
+            last_logged[dev_id] = {"temp_c": temp_c, "humidity": humidity}
 
         sensor_name = monitored[dev_id]
         home, room  = location_map.get(dev_id, ("", ""))
@@ -544,15 +552,15 @@ def main() -> None:
     # -- Poll thread -----------------------------------------------------------
     if poll_interval_secs > 0:
         def poll_loop() -> None:
-            logging.info(f"Poll thread started — interval {args.poll_interval}m")
+            logging.info(f"Poll thread started — polling {len(monitored)} sensor(s) every {args.poll_interval}m")
             while True:
-                time.sleep(poll_interval_secs)
-                now = time.time()
-                for dev_id, sensor_name in list(monitored.items()):
-                    with state_lock:
-                        last_push = last_pulsar.get(dev_id, 0)
-                    if now - last_push < poll_interval_secs:
-                        continue   # Pulsar is delivering for this sensor — skip
+                with state_lock:
+                    to_poll = [did for did in monitored if did not in pulsar_sensors]
+                if not to_poll:
+                    logging.info("Poll thread: all sensors are pushing via Pulsar — exiting poll loop")
+                    return
+                for dev_id in to_poll:
+                    sensor_name = monitored[dev_id]
                     try:
                         status = cloud.get_device_status(dev_id)
                     except Exception as e:
@@ -560,6 +568,7 @@ def main() -> None:
                         continue
                     if status:
                         process_items(dev_id, status, "Poll")
+                time.sleep(poll_interval_secs)
 
         t = threading.Thread(target=poll_loop, daemon=True, name="poll")
         t.start()
@@ -628,7 +637,10 @@ def main() -> None:
 
             items = payload.get("status") or biz_data.get("properties", [])
             with state_lock:
-                last_pulsar[dev_id] = time.time()
+                first_pulsar = dev_id not in pulsar_sensors
+                pulsar_sensors.add(dev_id)
+            if first_pulsar:
+                logging.info(f'"{sensor_name}" is pushing via Pulsar — removing from poll list')
             process_items(dev_id, items, "Pulsar")
 
             consumer.acknowledge_cumulative(msg)
