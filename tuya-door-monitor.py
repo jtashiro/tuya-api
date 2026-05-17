@@ -138,7 +138,7 @@ class TuyaCloud:
         r.raise_for_status()
         return r.json()
 
-    def find_device(self, name: str) -> dict:
+    def get_all_devices(self) -> list[dict]:
         devices, last_row_key = [], ""
         while True:
             params: dict = {"page_size": 20}
@@ -153,15 +153,34 @@ class TuyaCloud:
             devices.extend(batch)
             if not result.get("has_more") or not last_row_key or not batch:
                 break
+        return devices
 
-        match = next(
-            (d for d in devices if d.get("name", "").strip().lower() == name.strip().lower()),
-            None,
-        )
-        if not match:
-            names = sorted(d.get("name", "") for d in devices)
-            sys.exit(f'Device "{name}" not found.\nAvailable:\n  ' + "\n  ".join(names))
-        return match
+    def resolve_sensors(self, names: list[str]) -> dict[str, str]:
+        """
+        Return {device_id: friendly_name} for the sensors to monitor.
+
+        If names is empty, returns all door/window contact sensors found on
+        the account (Tuya category 'mcs').  If names are provided, each must
+        match a device by friendly name (case-insensitive); exits on mismatch.
+        """
+        all_devices = self.get_all_devices()
+
+        if not names:
+            sensors = {d["id"]: d.get("name", d["id"]).strip()
+                       for d in all_devices if d.get("category") == "mcs"}
+            if not sensors:
+                sys.exit("No door sensors (category 'mcs') found on this account.")
+            return sensors
+
+        name_lower = {d.get("name", "").strip().lower(): d for d in all_devices}
+        result: dict[str, str] = {}
+        for name in names:
+            match = name_lower.get(name.strip().lower())
+            if not match:
+                available = sorted(d.get("name", "") for d in all_devices)
+                sys.exit(f'Sensor "{name}" not found.\nAvailable:\n  ' + "\n  ".join(available))
+            result[match["id"]] = match.get("name", match["id"]).strip()
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +282,14 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--sensor", default="LBI Roof Door Sensor",
-                        help="Friendly name of the door sensor")
+    parser.add_argument("--sensor", nargs="*", default=[], metavar="NAME",
+                        help="Friendly name(s) of door sensors to monitor. "
+                             "Omit to monitor all door sensors on the account.")
     parser.add_argument("--open-only", action="store_true",
                         help="Send email only when the door opens, not when it closes")
+    default_consumer = os.path.splitext(os.path.basename(sys.argv[0]))[0]
+    parser.add_argument("--consumer-name", default=default_consumer,
+                        help=f"Consumer name shown in the Tuya portal (default: {default_consumer})")
     parser.add_argument("--test-env", action="store_true",
                         help="Subscribe to the test environment topic instead of production")
     parser.add_argument("--debug", action="store_true",
@@ -287,13 +310,13 @@ def main() -> None:
     if not access_id or not access_key:
         sys.exit("TUYA_ACCESS_ID and TUYA_ACCESS_KEY must be set in .config")
 
-    # -- Find sensor device ID -------------------------------------------------
-    logging.info(f'Resolving sensor "{args.sensor}" …')
-    cloud     = TuyaCloud(access_id, access_key, base_url)
-    sensor    = cloud.find_device(args.sensor)
-    device_id = sensor["id"]
-    logging.info(f'  Found: "{sensor.get("name","").strip()}"  '
-                 f'id={device_id}  category={sensor.get("category","?")}')
+    # -- Resolve sensors -------------------------------------------------------
+    cloud   = TuyaCloud(access_id, access_key, base_url)
+    label   = "all door sensors" if not args.sensor else ", ".join(f'"{s}"' for s in args.sensor)
+    logging.info(f"Resolving sensors ({label}) …")
+    monitored = cloud.resolve_sensors(args.sensor)   # {device_id: name}
+    for did, dname in monitored.items():
+        logging.info(f'  Monitoring: "{dname}"  id={did}')
 
     # -- Pulsar setup ----------------------------------------------------------
     mq_env       = MQ_ENV_TEST if args.test_env else MQ_ENV_PROD
@@ -314,9 +337,10 @@ def main() -> None:
         topic,
         sub_name,
         consumer_type=pulsar.ConsumerType.Failover,
+        consumer_name=args.consumer_name,
     )
 
-    logging.info(f'Listening for events on "{args.sensor.strip()}" — Ctrl-C to stop.')
+    logging.info(f"Listening for door events on {len(monitored)} sensor(s) — Ctrl-C to stop.")
     if args.open_only:
         logging.info("  (--open-only: close events logged but not emailed)")
 
@@ -348,8 +372,9 @@ def main() -> None:
                 consumer.acknowledge_cumulative(msg)
                 continue
 
-            dev_id = payload.get("devId") or payload.get("dev_id", "")
-            if dev_id != device_id:
+            dev_id      = payload.get("devId") or payload.get("dev_id", "")
+            sensor_name = monitored.get(dev_id)
+            if sensor_name is None:
                 consumer.acknowledge_cumulative(msg)
                 continue
 
@@ -357,9 +382,9 @@ def main() -> None:
                 if item.get("code") == DOOR_CODE:
                     is_open = bool(item.get("value"))
                     state   = "OPENED" if is_open else "CLOSED"
-                    logging.info(f"Door event → {state}")
+                    logging.info(f'Door event: "{sensor_name}" → {state}')
                     if is_open or not args.open_only:
-                        send_door_email(args.sensor, state)
+                        send_door_email(sensor_name, state)
 
             consumer.acknowledge_cumulative(msg)
 
