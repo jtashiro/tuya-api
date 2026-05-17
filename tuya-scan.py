@@ -183,6 +183,15 @@ class TuyaCloud:
             return result.get("rooms", [])
         return result
 
+    def get_home_device_ids(self, home_id) -> set[str]:
+        """IDs of all devices in a home. Returns empty set if not permitted."""
+        data = self._get(f"/v1.0/homes/{home_id}/devices")
+        if not data.get("success"):
+            return set()
+        result = data.get("result", {})
+        devs = result if isinstance(result, list) else result.get("devices", result.get("list", []))
+        return {d["id"] for d in devs if "id" in d}
+
     def get_room_device_ids(self, home_id, room_id) -> list[str]:
         """Returns device IDs assigned to a room."""
         data = self._get(f"/v1.0/homes/{home_id}/rooms/{room_id}/devices")
@@ -303,6 +312,8 @@ def main():
     parser = argparse.ArgumentParser(description="Tuya Cloud Device Scanner")
     parser.add_argument("--no-status", action="store_true",
                         help="Suppress the Status column and temperature summary")
+    parser.add_argument("--home", default=None,
+                        help="Restrict output to devices in this home (case-insensitive name)")
     args = parser.parse_args()
 
     cfg = load_config()
@@ -328,6 +339,18 @@ def main():
     homes = cloud.get_homes()
     if not homes:
         print("  (Home management API not available; devices will list without home/room grouping)")
+
+    if args.home:
+        name_to_home = {h.get("name", "").strip().lower(): h for h in homes}
+        home_entry = name_to_home.get(args.home.strip().lower())
+        if not home_entry:
+            avail = ", ".join(f'"{h.get("name","")}"' for h in homes) or "none"
+            sys.exit(f'Home "{args.home}" not found. Available: {avail}')
+        home_id = home_entry.get("home_id") or home_entry.get("id")
+        home_device_ids = cloud.get_home_device_ids(home_id)
+        devices = [d for d in devices if d.get("id") in home_device_ids]
+        homes = [home_entry]
+        print(f'  Filtered to home "{home_entry.get("name","")}": {len(devices)} device(s).')
 
     room_map    = build_room_map(cloud, homes)   # {device_id: (home_name, room_name)}
     home_order  = home_sort_key(homes)           # {home_name: index} for sort stability
@@ -422,7 +445,8 @@ def main():
                 print(f"  {r['_temp_f']:5.1f}°F   {r['name']:<40}  {home} / {room}")
 
     print(f"\n{'─' * 80}")
-    print(f"Total: {len(rows)} device(s) across {len(homes)} home(s).")
+    home_label = f'home "{args.home}"' if args.home else f"{len(homes)} home(s)"
+    print(f"Total: {len(rows)} device(s) across {home_label}.")
 
 
 if __name__ == "__main__":

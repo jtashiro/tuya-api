@@ -1,2 +1,4 @@
 requests
 prettytable
+pulsar-client
+pycryptodome
