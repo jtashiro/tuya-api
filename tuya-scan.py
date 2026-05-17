@@ -9,9 +9,14 @@ import argparse
 import hashlib
 import hmac
 import os
+import smtplib
 import sys
 import time
+from collections import defaultdict
+from datetime import datetime
 from configparser import ConfigParser
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from urllib.parse import quote
 
 try:
@@ -23,6 +28,11 @@ try:
     from prettytable import PrettyTable
 except ImportError:
     sys.exit("Missing dependency: pip install prettytable")
+
+try:
+    from email_config import SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO
+except ImportError:
+    SMTP_SERVER = SMTP_PORT = SMTP_USERNAME = SMTP_PASSWORD = EMAIL_FROM = EMAIL_TO = None
 
 
 # ---------------------------------------------------------------------------
@@ -249,12 +259,27 @@ def extract_temp_f(status: dict) -> float | None:
     return None
 
 
+BATTERY_KEYS = ["battery_percentage", "battery", "va_battery"]
+BATTERY_STATE_KEY = "battery_state"
+
+
+def extract_battery(status: dict) -> int | None:
+    """Return battery percentage (0-100) from a status dict, or None if unavailable."""
+    for key in BATTERY_KEYS:
+        if key in status:
+            val = status[key]
+            if isinstance(val, (int, float)):
+                return int(val)
+    return None
+
+
 def status_summary(status: dict) -> str:
     if not status:
         return "—"
     priority = ["switch", "switch_1", "switch_2", "switch_3", "switch_4",
                 "bright_value", "temp_value", "temp_current", "va_temperature",
-                "va_humidity", "humidity_value"]
+                "va_humidity", "humidity_value",
+                "battery_percentage", "battery", "va_battery", "battery_state"]
     parts, seen = [], set()
     for key in priority:
         if key in status:
@@ -305,6 +330,105 @@ def home_sort_key(homes: list[dict]) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------------------
+# Battery email
+# ---------------------------------------------------------------------------
+
+REPLACE_THRESHOLD = 20   # % — highlighted as needs replacement
+WARN_THRESHOLD    = 40   # % — highlighted as low
+
+
+def send_battery_email(bat_rows: list[dict]) -> None:
+    if not all([SMTP_SERVER, SMTP_PORT, SMTP_USERNAME, SMTP_PASSWORD, EMAIL_FROM, EMAIL_TO]):
+        print("Email config not set — skipping battery email.")
+        return
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    replace  = [r for r in bat_rows if r["_battery"] <= REPLACE_THRESHOLD]
+    subject  = f"Battery Status Report — {date_str}"
+    if replace:
+        subject += f" ({len(replace)} need replacement)"
+
+    # Group by home → room, sorted
+    grouped: dict[str, dict[str, list[dict]]] = defaultdict(lambda: defaultdict(list))
+    for r in bat_rows:
+        grouped[r["home"] or "(no home)"][r["room"] or "(no room)"].append(r)
+
+    def row_color(pct: int) -> str:
+        if pct <= REPLACE_THRESHOLD:
+            return "#c0392b"   # red
+        if pct <= WARN_THRESHOLD:
+            return "#e67e22"   # orange
+        return "#27ae60"       # green
+
+    def pct_bar(pct: int) -> str:
+        filled = round(pct / 5)
+        bar    = "█" * filled + "░" * (20 - filled)
+        return f'<span style="font-family:monospace;color:{row_color(pct)}">{bar}</span>'
+
+    sections = []
+    for home_name in sorted(grouped):
+        rooms_html = []
+        for room_name in sorted(grouped[home_name]):
+            devices = sorted(grouped[home_name][room_name], key=lambda r: r["name"].lower())
+            rows_html = []
+            for r in devices:
+                pct    = r["_battery"]
+                color  = row_color(pct)
+                note   = " — <b>REPLACE</b>" if pct <= REPLACE_THRESHOLD else \
+                         " — Low"            if pct <= WARN_THRESHOLD    else ""
+                rows_html.append(
+                    f'<tr>'
+                    f'<td style="padding:4px 12px">{r["name"]}</td>'
+                    f'<td style="padding:4px 12px;text-align:center">'
+                    f'  <span style="color:{color};font-weight:bold">{pct}%</span>'
+                    f'  {pct_bar(pct)}'
+                    f'  <span style="color:{color}">{note}</span>'
+                    f'</td>'
+                    f'</tr>'
+                )
+            rooms_html.append(
+                f'<h3 style="margin:16px 0 4px;color:#555">{room_name}</h3>'
+                f'<table style="border-collapse:collapse;width:100%">'
+                + "".join(rows_html)
+                + "</table>"
+            )
+        sections.append(
+            f'<h2 style="background:#34495e;color:#fff;padding:8px 12px;margin:24px 0 0">'
+            f'{home_name}</h2>'
+            + "".join(rooms_html)
+        )
+
+    html = f"""
+    <html><body style="font-family:sans-serif;max-width:700px;margin:auto">
+        <h1 style="color:#2c3e50">Battery Status Report</h1>
+        <p style="color:#888">{date_str} &nbsp;·&nbsp;
+           {len(bat_rows)} device(s) reporting battery</p>
+        {"".join(sections)}
+        <hr style="margin-top:32px">
+        <p style="color:#aaa;font-size:0.85em">
+            &#x25A0; ≤{REPLACE_THRESHOLD}% replace &nbsp;
+            &#x25A0; ≤{WARN_THRESHOLD}% low &nbsp;
+            &#x25A0; &gt;{WARN_THRESHOLD}% good
+        </p>
+    </body></html>
+    """
+
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"]    = f"SmartLifeMonitor <{EMAIL_FROM}>"
+    msg["To"]      = EMAIL_TO
+    msg.attach(MIMEText(html, "html"))
+    try:
+        with smtplib.SMTP(SMTP_SERVER, int(SMTP_PORT)) as server:
+            server.starttls()
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+            server.sendmail(EMAIL_FROM, EMAIL_TO, msg.as_string())
+        print(f"Battery email sent → {EMAIL_TO}")
+    except Exception as e:
+        print(f"Failed to send battery email: {e}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -312,6 +436,8 @@ def main():
     parser = argparse.ArgumentParser(description="Tuya Cloud Device Scanner")
     parser.add_argument("--no-status", action="store_true",
                         help="Suppress the Status column and temperature summary")
+    parser.add_argument("--email-battery", action="store_true",
+                        help="Send a battery status email grouped by home and room")
     parser.add_argument("--home", default=None,
                         help="Restrict output to devices in this home (case-insensitive name)")
     args = parser.parse_args()
@@ -383,6 +509,7 @@ def main():
 
         status   = status_from_listing(dev)
         temp_f   = extract_temp_f(status)
+        battery  = extract_battery(status)
         stat_str = status_summary(status)
         if temp_f is not None:
             stat_str += f"  |  {temp_f:.1f}°F"
@@ -403,6 +530,7 @@ def main():
             "status":     stat_str,
             "_home_idx":  home_order.get(home_name, 999),
             "_temp_f":    temp_f,
+            "_battery":   battery,
         })
 
     # ---- sort: home (API order) → room name → device name --------------------
@@ -444,9 +572,30 @@ def main():
                 room = r["room"] or "(no room)"
                 print(f"  {r['_temp_f']:5.1f}°F   {r['name']:<40}  {home} / {room}")
 
+    # ---- battery summary ------------------------------------------------------
+    if not args.no_status:
+        bat_rows = [r for r in rows if r["_battery"] is not None]
+        if bat_rows:
+            print(f"\n{'─' * 80}")
+            print("Battery levels:")
+            for r in sorted(bat_rows, key=lambda x: x["_battery"]):
+                home = r["home"] or "(no home)"
+                room = r["room"] or "(no room)"
+                pct  = r["_battery"]
+                flag = "  ⚠ LOW" if pct <= 20 else ""
+                print(f"  {pct:3d}%   {r['name']:<40}  {home} / {room}{flag}")
+
     print(f"\n{'─' * 80}")
     home_label = f'home "{args.home}"' if args.home else f"{len(homes)} home(s)"
     print(f"Total: {len(rows)} device(s) across {home_label}.")
+
+    # ---- battery email --------------------------------------------------------
+    if args.email_battery:
+        bat_rows = [r for r in rows if r["_battery"] is not None]
+        if bat_rows:
+            send_battery_email(bat_rows)
+        else:
+            print("No battery data found — email not sent.")
 
 
 if __name__ == "__main__":
