@@ -379,6 +379,8 @@ def main() -> None:
         path = " / ".join(filter(None, [home, room, dname]))
         logging.info(f'  Monitoring: {path}  id={did}')
 
+    last_state: dict[str, str] = {}   # {device_id: "OPENED"/"CLOSED"} — deduplicates twin Pulsar messages
+
     # -- Pulsar setup ----------------------------------------------------------
     mq_env       = MQ_ENV_TEST if args.test_env else MQ_ENV_PROD
     topic        = f"{access_id}/out/{mq_env}"
@@ -450,6 +452,9 @@ def main() -> None:
                 if item.get("code") == DOOR_CODE:
                     is_open = bool(item.get("value"))
                     state   = "OPENED" if is_open else "CLOSED"
+                    if last_state.get(dev_id) == state:
+                        continue   # duplicate Pulsar message — already handled
+                    last_state[dev_id] = state
                     home, room = location_map.get(dev_id, ("", ""))
                     loc_str    = f" [{home} / {room}]" if home or room else ""
                     logging.info(f'Door event: "{sensor_name}"{loc_str} → {state}')
