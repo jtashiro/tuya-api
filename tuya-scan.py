@@ -372,10 +372,13 @@ def send_battery_email(bat_rows: list[dict]) -> None:
             devices = sorted(grouped[home_name][room_name], key=lambda r: r["name"].lower())
             rows_html = []
             for r in devices:
-                pct    = r["_battery"]
-                color  = row_color(pct)
-                note   = " — <b>REPLACE</b>" if pct <= REPLACE_THRESHOLD else \
-                         " — Low"            if pct <= WARN_THRESHOLD    else ""
+                pct        = r["_battery"]
+                color      = row_color(pct)
+                note       = " — <b>REPLACE</b>" if pct <= REPLACE_THRESHOLD else \
+                             " — Low"            if pct <= WARN_THRESHOLD    else ""
+                online     = r["online"]
+                online_color = "#c0392b" if online == "OFFLINE" else \
+                               "#888"    if online == "?"        else "#27ae60"
                 rows_html.append(
                     f'<tr>'
                     f'<td style="padding:4px 12px">{r["name"]}</td>'
@@ -383,6 +386,9 @@ def send_battery_email(bat_rows: list[dict]) -> None:
                     f'  <span style="color:{color};font-weight:bold">{pct}%</span>'
                     f'  {pct_bar(pct)}'
                     f'  <span style="color:{color}">{note}</span>'
+                    f'</td>'
+                    f'<td style="padding:4px 12px;text-align:center">'
+                    f'  <span style="color:{online_color};font-weight:bold">{online}</span>'
                     f'</td>'
                     f'</tr>'
                 )
