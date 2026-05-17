@@ -342,15 +342,19 @@ def main() -> None:
                         help=f"Consumer name shown in the Tuya portal (default: {default_consumer})")
     parser.add_argument("--test-env", action="store_true",
                         help="Subscribe to the test environment topic instead of production")
+    parser.add_argument("--log", default=None, metavar="FILE",
+                        help="Also write log output to this file")
     parser.add_argument("--debug", action="store_true",
                         help="Print every raw and decrypted message")
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.debug else logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
-        stream=sys.stdout,
-    )
+    level    = logging.DEBUG if args.debug else logging.INFO
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if args.log:
+        os.makedirs(os.path.dirname(args.log), exist_ok=True)
+        handlers.append(logging.FileHandler(args.log))
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s",
+                        handlers=handlers)
 
     cfg        = load_config()
     access_id  = cfg.get("TUYA_ACCESS_ID",  "").strip()

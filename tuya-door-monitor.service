@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=YOUR_USERNAME
 WorkingDirectory=/home/YOUR_USERNAME/tuya-api
-ExecStart=/home/YOUR_USERNAME/tuya-api/.venv/bin/python3 /home/YOUR_USERNAME/tuya-api/tuya-door-monitor.py
+ExecStart=/home/YOUR_USERNAME/tuya-api/.venv/bin/python3 /home/YOUR_USERNAME/tuya-api/tuya-door-monitor.py --log %h/logs/tuya-door-monitor.log
 
 # Restart on failure with a short delay to avoid hammering the broker
 Restart=on-failure
