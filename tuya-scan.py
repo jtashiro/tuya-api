@@ -421,7 +421,7 @@ def send_battery_email(bat_rows: list[dict]) -> None:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"]    = f"SmartLifeMonitor <{EMAIL_FROM}>"
+    msg["From"]    = f"SmartLife <{EMAIL_FROM}>"
     msg["To"]      = EMAIL_TO
     msg.attach(MIMEText(html, "html"))
     try:
